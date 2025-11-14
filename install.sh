@@ -30,25 +30,36 @@ if $SOURCE_VENV; then
     echo "Sourcing venv"
     cd $DIR
     source venv/bin/activate
-    export PYTHONPATH=${DIR}/venv/lib/python3.5/site-packages
+    # Resolve site-packages dynamically
+    PY_SITE=$(python - <<'PY'
+import sys
+try:
+    import site
+    paths = getattr(site, 'getsitepackages', lambda: [])()
+except Exception:
+    paths = []
+try:
+    import sysconfig
+    paths.append(sysconfig.get_paths().get('purelib'))
+except Exception:
+    pass
+print([p for p in paths if p][0])
+PY
+)
+    export PYTHONPATH="$PY_SITE"
 fi
 
-# Install Git LFS (if not already)
-if git lfs install | grep -q 'initialized'; then
-    echo "Git LFS already installed"
-else
-    echo "Installing Git LFS and pulling"
-    if [ "$(uname)" == "Darwin" ]; then
-        # Do something under Mac OS X platform
-        brew install git-lfs
-        git lfs install
-    elif [ "$(expr substr $(uname -s) 1 5)" == "Linux" ]; then
-        # Do something under GNU/Linux platform
-        curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | sudo bash
-        sudo apt-get install git-lfs
-        git lfs install
+# Install Git LFS if available; otherwise skip (useful in container builds)
+if command -v git >/dev/null 2>&1; then
+    if git lfs version >/dev/null 2>&1; then
+        echo "Configuring Git LFS"
+        git lfs install || true
+        git lfs pull || true
+    else
+        echo "git-lfs not available; skipping LFS pull"
     fi
-    git lfs pull
+else
+    echo "git not available; skipping LFS setup"
 fi
 
 $DIR/gym-collision-avoidance/install.sh false false

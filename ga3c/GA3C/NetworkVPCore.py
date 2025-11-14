@@ -220,7 +220,12 @@ class NetworkVPCore(object):
         if mode == 'save':
             d = self.checkpoints_save_dir
         elif mode == 'load':
-            d = os.path.join(os.path.dirname(os.path.realpath(__file__)), "checkpoints", learning_method, 'wandb', wandb_runid_for_loading, 'checkpoints')
+            # Prefer W&B-style directory if a run id is provided; otherwise fall back to local RL_tmp
+            base_dir = os.path.dirname(os.path.realpath(__file__))
+            if wandb_runid_for_loading:
+                d = os.path.join(base_dir, "checkpoints", learning_method, 'wandb', wandb_runid_for_loading, 'checkpoints')
+            else:
+                d = os.path.join(base_dir, "checkpoints", "RL_tmp")
         else:
             raise NotImplementedError
 
@@ -236,16 +241,43 @@ class NetworkVPCore(object):
         self.saver.save(self.sess, self._checkpoint_filename(episode, learning_method=learning_method, mode='save'))
 
     def load(self, learning_method='RL'):
-
+        # Try W&B-style directory first (if provided), then fall back to local RL_tmp checkpoints.
+        candidates = []
+        # 1) Explicit episode number
         if Config.EPISODE_NUMBER_TO_LOAD > 0:
-            filename = self._checkpoint_filename(Config.EPISODE_NUMBER_TO_LOAD, mode='load', wandb_runid_for_loading=Config.LOAD_FROM_WANDB_RUN_ID)
+            candidates.append(self._checkpoint_filename(Config.EPISODE_NUMBER_TO_LOAD, mode='load', learning_method=learning_method, wandb_runid_for_loading=Config.LOAD_FROM_WANDB_RUN_ID))
+            # Also attempt RL_tmp with the same episode number
+            candidates.append(self._checkpoint_filename(Config.EPISODE_NUMBER_TO_LOAD, mode='load', learning_method=learning_method, wandb_runid_for_loading=None))
         else:
-            filename = tf.train.latest_checkpoint(os.path.dirname(self._checkpoint_filename(episode=0, mode='load', learning_method=learning_method, wandb_runid_for_loading=Config.LOAD_FROM_WANDB_RUN_ID)))
+            # 2) Latest in W&B dir
+            wb_dir = os.path.dirname(self._checkpoint_filename(episode=0, mode='load', learning_method=learning_method, wandb_runid_for_loading=Config.LOAD_FROM_WANDB_RUN_ID))
+            if os.path.isdir(wb_dir):
+                latest = tf.train.latest_checkpoint(wb_dir)
+                if latest:
+                    candidates.append(latest)
+            # 3) Latest in RL_tmp
+            rl_tmp_dir = os.path.dirname(self._checkpoint_filename(episode=0, mode='load', learning_method=learning_method, wandb_runid_for_loading=None))
+            if os.path.isdir(rl_tmp_dir):
+                latest = tf.train.latest_checkpoint(rl_tmp_dir)
+                if latest:
+                    candidates.append(latest)
 
-        print("[NetworkVPCore] Loading checkpoint file:", filename)
-        self.saver.restore(self.sess, filename)
+        # Deduplicate while preserving order
+        seen = set()
+        candidates = [c for c in candidates if not (c in seen or seen.add(c))]
 
-        return self._get_episode_from_filename(filename)
+        for filename in candidates:
+            try:
+                if not filename:
+                    continue
+                print("[NetworkVPCore] Attempting to load checkpoint:", filename)
+                self.saver.restore(self.sess, filename)
+                return self._get_episode_from_filename(filename)
+            except Exception as e:
+                print("[NetworkVPCore] Failed to load checkpoint {} due to {}. Trying next candidate...".format(filename, repr(e)))
+
+        print("[NetworkVPCore] No valid checkpoint found. Starting from randomly initialized weights.")
+        return 0
 
     def train_with_regression(self, dataset_ped_train, dataset_ped_test):
 
